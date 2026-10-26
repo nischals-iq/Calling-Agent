@@ -1,0 +1,539 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// -------------------------------------------------------------
+// ENUMS
+// -------------------------------------------------------------
+
+enum ClientStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum SubscriptionPlan {
+  FREE
+  STARTER
+  PRO
+  ENTERPRISE
+}
+
+enum UserRole {
+  PLATFORM_ADMIN
+  CLIENT_ADMIN
+  SALES_MANAGER
+  SALES_EXECUTIVE
+  MARKETING_USER
+  VIEWER
+}
+
+enum LeadTemperature {
+  COLD
+  WARM
+  HOT
+  QUALIFIED
+  WON
+  LOST
+}
+
+enum ChannelType {
+  META
+  GOOGLE
+  LINKEDIN
+  WEBSITE
+  WHATSAPP
+  REFERRAL
+  CSV_IMPORT
+  OTHER
+}
+
+enum IntegrationStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+enum ActivityType {
+  CALL
+  WHATSAPP
+  EMAIL
+  NOTE
+  STATUS_CHANGE
+  STAGE_CHANGE
+  TASK_COMPLETED
+  MEETING
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  OVERDUE
+  CANCELLED
+}
+
+enum TaskType {
+  CALL
+  FOLLOW_UP
+  MEETING
+  DEMO
+  EMAIL
+  OTHER
+}
+
+enum CallJobStatus {
+  PENDING
+  QUEUED
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum CallJobPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+// -------------------------------------------------------------
+// MODULE 1: ADMIN & CLIENT MANAGEMENT (MULTI-TENANCY)
+// -------------------------------------------------------------
+
+model Client {
+  id                   String           @id @default(uuid())
+  name                 String
+  businessCategory     String?
+  primaryContactName   String?
+  primaryContactEmail  String?
+  primaryContactPhone  String?
+  companyAddress       String?
+  country              String?
+  timezone             String           @default("UTC")
+  status               ClientStatus     @default(ACTIVE)
+  plan                 SubscriptionPlan @default(STARTER)
+  apiKey               String?          // Public lead-intake API key for web forms and webhooks
+  settings             Json?            // Notification rules, timezone, custom configurations
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  users                User[]
+  teams                Team[]
+  leadStages           LeadStage[]
+  leads                Lead[]
+  integrations         Integration[]
+  campaigns            Campaign[]
+  internalCampaigns    InternalCampaign[]
+  tasks                Task[]
+  activities           LeadActivity[]
+  templates            MessageTemplate[]
+  leadRules            LeadRule[]
+  customFields         CustomField[]
+  auditLogs            AuditLog[]
+  callJobs             AiCallJob[]
+
+  @@map("clients")
+}
+
+// -------------------------------------------------------------
+// MODULE 2: CLIENT USERS & ACCESS CONTROL
+// -------------------------------------------------------------
+
+model User {
+  id             String         @id @default(uuid())
+  clientId       String?        // Nullable for PLATFORM_ADMIN
+  email          String         @unique
+  passwordHash   String
+  name           String
+  mobile         String?
+  role           UserRole       @default(SALES_EXECUTIVE)
+  permissions    Json?          // Array of action/page permissions e.g. ["clients:write", "users:read"]
+  teamId         String?
+  isActive       Boolean        @default(true)
+  avatarUrl      String?
+  lastLoginAt    DateTime?
+  preferences    Json?          // Notification & workspace preferences e.g. { emailAlerts: true }
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  client         Client?        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  team           Team?          @relation("TeamMembers", fields: [teamId], references: [id], onDelete: SetNull)
+  managedTeams   Team[]         @relation("TeamManager")
+
+  assignedLeads  Lead[]         @relation("AssignedLeads")
+  assignedTasks  Task[]         @relation("AssignedTasks")
+  activities     LeadActivity[]
+  auditLogs      AuditLog[]
+
+  @@map("users")
+}
+
+model Team {
+  id          String    @id @default(uuid())
+  clientId    String
+  name        String
+  description String?
+  type        String    @default("SALES") // "SALES", "MARKETING", "SUPPORT"
+  isActive    Boolean   @default(true)
+  managerId   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  client      Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  manager     User?     @relation("TeamManager", fields: [managerId], references: [id], onDelete: SetNull)
+  members     User[]    @relation("TeamMembers")
+  leads       Lead[]
+
+  @@map("teams")
+}
+
+// -------------------------------------------------------------
+// MODULE 3 & 7: INTEGRATIONS, CAMPAIGNS & MARKETING ATTRIBUTION
+// -------------------------------------------------------------
+
+model Integration {
+  id           String            @id @default(uuid())
+  clientId     String
+  channel      ChannelType
+  name         String?
+  status       IntegrationStatus @default(CONNECTED)
+  credentials  Json?             // Encrypted OAuth tokens, API secrets
+  metadata     Json?             // Connected accountId, pageId, formId, webhook status
+  lastSyncedAt DateTime?
+  errorMessage String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  client       Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaigns    Campaign[]
+
+  @@map("integrations")
+}
+
+model Campaign {
+  id                 String       @id @default(uuid())
+  clientId           String
+  integrationId      String?
+  name               String
+  source             ChannelType
+  platformCampaignId String?
+  status             String       @default("ACTIVE") // ACTIVE, PAUSED, COMPLETED
+  spend              Float        @default(0)
+  budget             Float?
+  startDate          DateTime?
+  endDate            DateTime?
+  metadata           Json?        // Stores Ad Set ID, targeting, optimization, and platform config
+  internalCampaignId String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  client             Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  integration        Integration?      @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+  internalCampaign   InternalCampaign? @relation(fields: [internalCampaignId], references: [id], onDelete: SetNull)
+  leads              Lead[]
+
+  @@map("campaigns")
+}
+
+model InternalCampaign {
+  id                 String       @id @default(uuid())
+  clientId           String
+  name               String
+  objective          String       @default("LEADS") // "LEADS", "WEBSITE_TRAFFIC"
+  totalBudget        Float?
+  startDate          DateTime?
+  endDate            DateTime?
+  landingPageUrl     String?
+
+  // Targeting
+  locations          Json?        // e.g. ["IN", "US"]
+  minAge             Int?         @default(18)
+  maxAge             Int?         @default(65)
+  gender             String?      @default("ALL") // "ALL", "MALE", "FEMALE"
+
+  // Creative / Common Copy
+  headline           String?
+  primaryText        String?
+  description        String?
+  callToAction       String?      @default("LEARN_MORE")
+
+  // Platform Selection
+  useMeta            Boolean      @default(false)
+  useGoogle          Boolean      @default(false)
+
+  // Status: DRAFT, READY_TO_PUBLISH, PUBLISHING, PARTIALLY_PUBLISHED, PUBLISHED, FAILED
+  status             String       @default("DRAFT")
+
+  metadata           Json?        // Extensible for future platform adapters
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  client             Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  platformCampaigns  Campaign[]
+
+  @@map("internal_campaigns")
+}
+
+model WebhookLog {
+  id         String      @id @default(uuid())
+  clientId   String?
+  channel    ChannelType
+  eventType  String?
+  payload    Json
+  status     String      @default("PROCESSED") // RECEIVED, PROCESSED, FAILED
+  error      String?
+  createdAt  DateTime    @default(now())
+
+  @@map("webhook_logs")
+}
+
+// -------------------------------------------------------------
+// MODULE 4: LEAD MANAGEMENT & CRM PIPELINE
+// -------------------------------------------------------------
+
+model LeadStage {
+  id          String   @id @default(uuid())
+  clientId    String
+  name        String   // "New", "Contacted", "Qualified", "Demo/Meeting", "Proposal", "Negotiation", "Won", "Lost"
+  order       Int      @default(0)
+  color       String?  // Hex color code for Kanban column
+  probability Float?   // 0 - 100 percentage
+  isWon       Boolean  @default(false)
+  isLost      Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  leads       Lead[]
+
+  @@map("lead_stages")
+}
+
+model Lead {
+  id                 String          @id @default(uuid())
+  clientId           String
+  
+  // Contact details
+  firstName          String
+  lastName           String?
+  email              String?
+  phone              String?
+  alternatePhone     String?
+  company            String?
+  jobTitle           String?
+
+  // Pipeline & Temperature
+  stageId            String
+  temperature        LeadTemperature @default(COLD)
+  
+  // Ownership
+  assignedToId       String?
+  assignedTeamId     String?
+
+  // Source & Marketing Attribution
+  source             ChannelType     @default(WEBSITE)
+  medium             String?         // general medium e.g. cpc, referral, organic, form
+  campaignId         String?
+  campaignName       String?         // Plaintext campaign name where platform campaignId is not linked
+  adSetId            String?
+  adId               String?
+  formId             String?
+  landingPageUrl     String?
+  utmSource          String?
+  utmMedium          String?
+  utmCampaign        String?
+  utmContent         String?
+  utmTerm            String?
+
+  notes              String?         // Initial notes / message / inquiry details
+
+  // Conversion & Outcome
+  dealValue          Float?
+  wonAt              DateTime?
+  lostAt             DateTime?
+  lossReason         String?         // Captured on loss
+  lossComment        String?
+
+  // Deduplication & Merging
+  isDuplicate        Boolean         @default(false)
+  duplicateOfId      String?
+  duplicateCount     Int             @default(0)
+  duplicateReason    String?
+
+  // Custom Fields (JSON Key-Value)
+  customFields       Json?
+
+  firstContactedAt   DateTime?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  // Relations
+  client             Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  stage              LeadStage       @relation(fields: [stageId], references: [id])
+  assignedTo         User?           @relation("AssignedLeads", fields: [assignedToId], references: [id], onDelete: SetNull)
+  assignedTeam       Team?           @relation(fields: [assignedTeamId], references: [id], onDelete: SetNull)
+  campaign           Campaign?       @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  duplicateOf        Lead?           @relation("LeadDuplicates", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  duplicates         Lead[]          @relation("LeadDuplicates")
+
+  activities         LeadActivity[]
+  tasks              Task[]
+  callJobs           AiCallJob[]
+
+  @@index([clientId, email])
+  @@index([clientId, phone])
+  @@index([clientId, createdAt])
+  @@map("leads")
+}
+
+// -------------------------------------------------------------
+// MODULE 5: COMMUNICATION & FOLLOW-UP
+// -------------------------------------------------------------
+
+model LeadActivity {
+  id          String       @id @default(uuid())
+  clientId    String
+  leadId      String
+  userId      String?
+  type        ActivityType
+  title       String
+  description String?
+  metadata    Json?        // Call duration, recording URL, email response, WhatsApp status
+  createdAt   DateTime     @default(now())
+
+  client      Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  lead        Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  user        User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("lead_activities")
+}
+
+model Task {
+  id           String      @id @default(uuid())
+  clientId     String
+  leadId       String?
+  assignedToId String
+  title        String
+  description  String?
+  type         TaskType    @default(FOLLOW_UP)
+  status       TaskStatus  @default(PENDING)
+  dueDate      DateTime
+  reminderAt   DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  client       Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  lead         Lead?       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignedTo   User        @relation("AssignedTasks", fields: [assignedToId], references: [id], onDelete: Cascade)
+
+  @@map("tasks")
+}
+
+model MessageTemplate {
+  id          String      @id @default(uuid())
+  clientId    String
+  name        String
+  channel     ChannelType
+  subject     String?
+  body        String
+  variables   Json?       // List of dynamic variables like {{lead.firstName}}
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  client      Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@map("message_templates")
+}
+
+// -------------------------------------------------------------
+// MODULE 8: RULES, CUSTOM FIELDS & AUDIT LOGS
+// -------------------------------------------------------------
+
+model LeadRule {
+  id          String   @id @default(uuid())
+  clientId    String
+  name        String
+  ruleType    String   // "AUTO_ASSIGNMENT", "TEMPERATURE", "DUPLICATE"
+  conditions  Json     // JSON rules definition
+  actions     Json     // Action definition (e.g. assign to team, set hot)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@map("lead_rules")
+}
+
+model CustomField {
+  id          String   @id @default(uuid())
+  clientId    String
+  name        String   // Field key, e.g. "budget_range"
+  label       String   // UI Label, e.g. "Budget Range"
+  fieldType   String   // TEXT, NUMBER, SELECT, DATE, BOOLEAN
+  options     Json?    // Dropdown choices if SELECT
+  isRequired  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, name])
+  @@map("custom_fields")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  clientId   String?
+  userId     String?
+  action     String   // e.g. "CLIENT_CREATED", "LEAD_EXPORTED", "INTEGRATION_CONNECTED"
+  resource   String   // e.g. "Client", "Lead", "Integration"
+  resourceId String?
+  details    Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  client     Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("audit_logs")
+}
+
+// -------------------------------------------------------------
+// MODULE 6: AI VOICE CALLING & DISPATCH
+// -------------------------------------------------------------
+
+model AiCallJob {
+  id             String          @id @default(uuid())
+  leadId         String
+  clientId       String
+  status         CallJobStatus   @default(PENDING)
+  priority       CallJobPriority @default(HIGH)
+  scheduledAt    DateTime        @default(now())
+  attemptNumber  Int             @default(0)
+  idempotencyKey String          @unique
+  queuedAt       DateTime?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  failedAt       DateTime?
+  lastError      String?
+  metadata       Json?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  client         Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  lead           Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, status])
+  @@index([leadId])
+  @@map("ai_call_jobs")
+}
