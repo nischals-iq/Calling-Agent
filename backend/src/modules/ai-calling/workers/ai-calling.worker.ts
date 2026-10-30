@@ -3,6 +3,9 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { PrismaService } from '../../../prisma/prisma.service.js';
 import { CallEligibilityService } from '../call-eligibility.service.js';
+import { MockTelephonyAdapter } from '../adapters/mock-telephony.adapter.js';
+import { TelephonyProviderService } from '../adapters/telephony-provider.service.js';
+import { CallRetryService } from '../call-retry.service.js';
 import { AI_CALLING_QUEUE, DispatchJobPayload } from '../call-queue.service.js';
 import { CallJobStatus } from '@prisma/client';
 
@@ -13,13 +16,16 @@ export class AiCallingWorker extends WorkerHost {
   constructor(
     private readonly prisma: PrismaService,
     private readonly eligibilityService: CallEligibilityService,
+    private readonly providerService: TelephonyProviderService,
+    private readonly mockTelephony: MockTelephonyAdapter,
+    private readonly retryService: CallRetryService,
   ) {
     super();
   }
 
   /**
    * BullMQ Worker process handler for AI Call Jobs
-   * Handles full lifecycle: QUEUED -> IN_PROGRESS -> COMPLETED (or FAILED)
+   * Orchestrates the call session lifecycle and handles failure/retry evaluation.
    */
   async process(job: Job<DispatchJobPayload>): Promise<any> {
     const { callJobId, leadId, clientId } = job.data;
@@ -66,7 +72,7 @@ export class AiCallingWorker extends WorkerHost {
         return { success: false, reason: 'CLIENT_TENANT_MISMATCH' };
       }
 
-      // 3. Recheck eligibility before processing
+      // 3. Recheck Module 4.2 eligibility before processing
       const eligibility = await this.eligibilityService.evaluateWorkerEligibility(
         leadId,
         clientId,
@@ -102,37 +108,68 @@ export class AiCallingWorker extends WorkerHost {
         `[WORKER] Call job ${callJobId} transitioned: QUEUED -> IN_PROGRESS (attempt #${callJob.attemptNumber + 1})`,
       );
 
-      // 5. Observable simulation delay (4 seconds) so IN_PROGRESS state is visible in testing/monitoring
-      await new Promise((resolve) => setTimeout(resolve, 4000));
+      // 5. Select telephony provider (MOCK_TELEPHONY or EXOTEL)
+      const requestedProvider = (callJob.metadata as any)?.provider;
+      const provider = this.providerService.getProvider(requestedProvider);
 
-      // 6. Transition to COMPLETED with metadata recording simulated outcome
-      const completedJob = await this.prisma.aiCallJob.update({
-        where: { id: callJobId },
-        data: {
-          status: CallJobStatus.COMPLETED,
-          completedAt: new Date(),
-          metadata: {
-            ...((callJob.metadata as Record<string, any>) || {}),
-            simulatedExecution: {
-              outcome: 'CALL_COMPLETED_SUCCESSFULLY',
-              leadPhone: callJob.lead?.phone,
-              durationSeconds: 4,
-              dispatchedAt: new Date().toISOString(),
-              telephonyReady: false,
-              mode: 'SIMULATION_FOUNDATION',
-            },
-          },
+      this.logger.log(
+        `[WORKER] Initiating call for job ${callJobId} via provider "${provider.name}" (simulated: ${provider.isSimulated})`,
+      );
+
+      const callInit = await provider.initiateCall({
+        clientId,
+        leadId,
+        callJobId,
+        phone: callJob.lead?.phone || '',
+        languageUsed: callJob.lead?.preferredLanguage || 'en',
+        metadata: {
+          jobAttempt: callJob.attemptNumber + 1,
         },
       });
 
+      // 6. Provider-specific progression handling:
+      if (provider.isSimulated) {
+        const targetOutcome =
+          (callJob.metadata as any)?.simulateOutcome || 'COMPLETED';
+
+        const sessionResult = await this.mockTelephony.simulateProgression(
+          callInit.providerCallId,
+          targetOutcome,
+        );
+
+        // 7. Coordinate job status & retries based on session outcome
+        const session = sessionResult.session!;
+        const retryEval = await this.retryService.handleCallOutcome(
+          callJobId,
+          session.status,
+          session.outcome || session.status,
+          (callJob.metadata as any)?.testRetryDelayMs,
+        );
+
+        return {
+          success: true,
+          callJobId,
+          provider: provider.name,
+          sessionStatus: session.status,
+          outcome: session.outcome,
+          retryScheduled: retryEval.retryScheduled,
+        };
+      }
+
+      // If provider is a real carrier (e.g. EXOTEL):
+      // The call is now INITIATED on the carrier.
+      // Crucial: Do NOT mark COMPLETED! The job remains in IN_PROGRESS awaiting StatusCallback webhooks.
       this.logger.log(
-        `[WORKER] Call job ${callJobId} successfully processed: IN_PROGRESS -> COMPLETED`,
+        `[WORKER] Outbound call placed via ${provider.name}. Sid: ${callInit.providerCallId}. Job ${callJobId} remains IN_PROGRESS awaiting carrier callbacks.`,
       );
 
       return {
         success: true,
-        callJobId: completedJob.id,
-        status: completedJob.status,
+        callJobId,
+        provider: provider.name,
+        providerCallId: callInit.providerCallId,
+        status: CallJobStatus.IN_PROGRESS,
+        waitingForWebhook: true,
       };
     } catch (err: any) {
       this.logger.error(

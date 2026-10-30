@@ -105,6 +105,17 @@ enum CallJobPriority {
   URGENT
 }
 
+enum TelephonyStatus {
+  INITIATED
+  RINGING
+  CONNECTED
+  BUSY
+  NO_ANSWER
+  FAILED
+  COMPLETED
+  CANCELLED
+}
+
 // -------------------------------------------------------------
 // MODULE 1: ADMIN & CLIENT MANAGEMENT (MULTI-TENANCY)
 // -------------------------------------------------------------
@@ -140,6 +151,9 @@ model Client {
   customFields         CustomField[]
   auditLogs            AuditLog[]
   callJobs             AiCallJob[]
+  consents             AiCallConsent[]
+  suppressions         AiCallSuppression[]
+  callSessions         AiCallSession[]
 
   @@map("clients")
 }
@@ -369,6 +383,10 @@ model Lead {
   duplicateCount     Int             @default(0)
   duplicateReason    String?
 
+  // Compliance & Communication Preferences
+  doNotCall          Boolean         @default(false)
+  preferredLanguage  String?
+
   // Custom Fields (JSON Key-Value)
   customFields       Json?
 
@@ -388,6 +406,9 @@ model Lead {
   activities         LeadActivity[]
   tasks              Task[]
   callJobs           AiCallJob[]
+  consents           AiCallConsent[]
+  suppressions       AiCallSuppression[]
+  callSessions       AiCallSession[]
 
   @@index([clientId, email])
   @@index([clientId, phone])
@@ -532,8 +553,100 @@ model AiCallJob {
 
   client         Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
   lead           Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  sessions       AiCallSession[]
 
   @@index([clientId, status])
   @@index([leadId])
   @@map("ai_call_jobs")
 }
+
+model AiCallConsent {
+  id                String   @id @default(uuid())
+  clientId          String
+  leadId            String
+  purpose           String   @default("AI_VOICE_CALL") // "AI_VOICE_CALL", "AUTOMATED_CALL", "MARKETING_CALL"
+  consentStatus     String   @default("GRANTED")       // "GRANTED", "DENIED", "WITHDRAWN", "UNKNOWN"
+  source            String?  // "WEB_FORM", "META_FORM", "GOOGLE_FORM", "WHATSAPP", "MANUAL"
+  evidenceReference String?  // Form URL, submission ID, IP address, timestamp
+  notes             String?
+  capturedAt        DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  client            Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  lead              Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, leadId])
+  @@index([clientId, consentStatus])
+  @@map("ai_call_consents")
+}
+
+model AiCallSuppression {
+  id          String   @id @default(uuid())
+  clientId    String
+  leadId      String?
+  phone       String   // E.164 or normalized digits
+  phoneHash   String?  // SHA-256 for privacy lookup
+  reason      String   // "DNC_REQUEST", "OPTOUT", "COMPLAINT", "MANUAL_SUPPRESSION", "TRAI_DND"
+  source      String?  // "CALL_AGENT", "WEB_OPT_OUT", "CRM_MANUAL", "NATIONAL_REGISTRY"
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  lead        Lead?    @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([clientId, phone])
+  @@index([clientId, phoneHash])
+  @@map("ai_call_suppressions")
+}
+
+model AiCallSession {
+  id                 String          @id @default(uuid())
+  clientId           String
+  leadId             String
+  callJobId          String
+  provider           String          @default("MOCK_TELEPHONY") // MOCK_TELEPHONY, EXOTEL, TWILIO, etc.
+  providerCallId     String          @unique                    // Provider's unique call SID / call ID
+  status             TelephonyStatus @default(INITIATED)
+  languageUsed       String?         @default("en")
+  startedAt          DateTime        @default(now())
+  connectedAt        DateTime?
+  endedAt            DateTime?
+  durationSeconds    Int             @default(0)
+  outcome            String?         // PENDING, QUALIFIED, CALLBACK_REQUESTED, NOT_INTERESTED, BUSY, NO_ANSWER, FAILED, etc.
+  qualificationScore Float?
+  summary            String?
+  recordingReference String?
+  recordingDuration  Int?
+  failureReason      String?         // Reason/error message for failed, busy, or unfulfilled call
+  metadata           Json?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  client             Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  lead               Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  callJob            AiCallJob       @relation(fields: [callJobId], references: [id], onDelete: Cascade)
+  messages           AiCallMessage[]
+
+  @@index([clientId, leadId])
+  @@index([clientId, status])
+  @@index([callJobId])
+  @@index([providerCallId])
+  @@map("ai_call_sessions")
+}
+
+model AiCallMessage {
+  id             String        @id @default(uuid())
+  sessionId      String
+  speaker        String        // "AGENT", "PROSPECT", "SYSTEM"
+  transcriptText String
+  languageCode   String?
+  turnOrder      Int           @default(0)
+  createdAt      DateTime      @default(now())
+
+  session        AiCallSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("ai_call_messages")
+}
+
+

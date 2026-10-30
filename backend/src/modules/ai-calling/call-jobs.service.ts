@@ -145,25 +145,116 @@ export class CallJobsService {
             source: true,
           },
         },
+        sessions: {
+          take: 1,
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            provider: true,
+            providerCallId: true,
+            status: true,
+            outcome: true,
+            durationSeconds: true,
+            recordingReference: true,
+            failureReason: true,
+            startedAt: true,
+            connectedAt: true,
+            endedAt: true,
+            metadata: true,
+          },
+        },
       },
     });
 
-    return jobs.map((job) => ({
-      id: job.id,
-      leadId: job.leadId,
+    return jobs.map((job) => {
+      const latest = job.sessions?.[0] || null;
+      return {
+        id: job.id,
+        leadId: job.leadId,
+        leadName: `${job.lead?.firstName || ''} ${job.lead?.lastName || ''}`.trim() || 'Unknown Lead',
+        phone: job.lead?.phone || '—',
+        source: job.lead?.source || '—',
+        status: job.status,
+        priority: job.priority,
+        attemptNumber: job.attemptNumber,
+        scheduledAt: job.scheduledAt,
+        queuedAt: job.queuedAt,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt,
+        failedAt: job.failedAt,
+        lastError: job.lastError,
+        metadata: job.metadata,
+        createdAt: job.createdAt,
+        latestSession: latest
+          ? {
+              id: latest.id,
+              provider: latest.provider,
+              providerCallId: latest.providerCallId,
+              status: latest.status,
+              outcome: latest.outcome,
+              durationSeconds: latest.durationSeconds,
+              recordingReference: latest.recordingReference,
+              failureReason: latest.failureReason,
+              startedAt: latest.startedAt,
+              connectedAt: latest.connectedAt,
+              endedAt: latest.endedAt,
+              isSimulated:
+                (latest.metadata as any)?.isSimulated ?? (latest.provider === 'MOCK_TELEPHONY'),
+            }
+          : null,
+      };
+    });
+  }
+
+  /**
+   * Retrieves full details for a single call job including all call sessions and transcript messages, strictly scoped to tenant.
+   */
+  async getJobDetails(jobId: string, clientId: string) {
+    const job = await this.prisma.aiCallJob.findFirst({
+      where: { id: jobId, clientId },
+      include: {
+        lead: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            source: true,
+            stage: true,
+            doNotCall: true,
+            preferredLanguage: true,
+            createdAt: true,
+          },
+        },
+        sessions: {
+          orderBy: { createdAt: 'desc' },
+          include: {
+            messages: {
+              orderBy: { turnOrder: 'asc' },
+            },
+          },
+        },
+      },
+    });
+
+    if (!job) {
+      return null;
+    }
+
+    const mappedSessions = job.sessions.map((s) => ({
+      ...s,
+      isSimulated: (s.metadata as any)?.isSimulated ?? (s.provider === 'MOCK_TELEPHONY'),
+    }));
+
+    return {
+      ...job,
       leadName: `${job.lead?.firstName || ''} ${job.lead?.lastName || ''}`.trim() || 'Unknown Lead',
       phone: job.lead?.phone || '—',
       source: job.lead?.source || '—',
-      status: job.status,
-      priority: job.priority,
-      attemptNumber: job.attemptNumber,
-      scheduledAt: job.scheduledAt,
-      queuedAt: job.queuedAt,
-      startedAt: job.startedAt,
-      completedAt: job.completedAt,
-      failedAt: job.failedAt,
-      lastError: job.lastError,
-      createdAt: job.createdAt,
-    }));
+      sessions: mappedSessions,
+      latestSession: mappedSessions[0] || null,
+    };
   }
 }
+
